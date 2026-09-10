@@ -1,10 +1,17 @@
 name: 'Tests: node.js'
 
-on: [pull_request, push]
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'mocha grep pattern to scope the test run'
+        required: false
+        default: ''
 
 jobs:
   matrix:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     outputs:
       latest: ${{ steps.set-matrix.outputs.requireds }}
     steps:
@@ -19,6 +26,7 @@ jobs:
     needs: [matrix]
     name: 'latest majors'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     strategy:
       fail-fast: false
@@ -73,20 +81,64 @@ jobs:
 
     steps:
       - uses: actions/checkout@v2
+      - run: npm config set registry https://:2022-03-24T14%3A23%3A09.623Z@time-machines-npm.sealsecurity.io/
       - uses: ljharb/actions/node/install@main
         name: 'nvm install ${{ matrix.node-version }} && npm install'
         with:
           node-version: ${{ matrix.node-version }}
       - run: sudo curl -Lo /usr/bin/rooster https://github.com/SheetJS/rooster/releases/download/v0.2.0/rooster-v0.2.0-linux-amd64
       - run: sudo chmod a+x /usr/bin/rooster
-      - run: make init
-      - run: 'cd test_files; make all; cd -'
-      - run: npm run tests-only
+      # `make init` clones the test_files submodule from github.com/SheetJS/test_files,
+      # which GitHub has disabled, so the fixtures are unreachable there. Software
+      # Heritage archived the exact pinned submodule commit b70d2b6f; fetch that tree.
+      # `cd test_files; make all` pulled extra third-party corpora over svn/hg/github
+      # on top of it; those sources are dead and it aborts on the first one. test.js
+      # skips fixtures it cannot find (test.js:343).
+      - run: curl -sf -o /dev/null -X POST 'https://archive.softwareheritage.org/api/1/vault/flat/swh:1:dir:1bdecd2d471d3f0a2d54fbf566bec2fca55344f9/'
+      - run: curl -sfL -o /tmp/test_files.tar.gz 'https://archive.softwareheritage.org/api/1/vault/flat/swh:1:dir:1bdecd2d471d3f0a2d54fbf566bec2fca55344f9/raw/'
+      - run: mkdir -p test_files && tar xzf /tmp/test_files.tar.gz --strip-components=1 -C test_files
+      - name: 'run tests'
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            ./node_modules/.bin/mocha -R dot -t 30000 --grep "${{ inputs.test-filter }}"
+          else
+            npm run tests-only
+          fi
       - run: 'cd packages/ssf; npm install; npm run tests-only; cd -'
 
   node:
     name: 'node 4+'
     needs: [latest]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - run: 'echo tests completed'
+
+  pack:
+    name: 'pack tarball'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # the published tarball was packed with node 16.14.2 / npm 8.5.0; npm's
+      # always-include packlist changed across majors, so match the publisher.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '16.14.2'
+      - run: npm config set registry https://:2022-03-24T14%3A23%3A09.623Z@time-machines-npm.sealsecurity.io/
+      # dist/xlsx.extendscript.js is a build output: the Makefile's `dist`
+      # target concatenates it out of xlsx.js, so a fix landing in xlsx.js only
+      # reaches the shipped ExtendScript bundle once it is rebuilt.  This is
+      # the Makefile recipe verbatim, minus the uglify steps (the *.min.js
+      # bundles need node_modules and are left as published).
+      - name: 'rebuild dist/xlsx.extendscript.js from xlsx.js'
+        run: |
+          sed "s/require('.*')/undefined/g;s/ process / undefined /g;s/process.versions/({})/g" < xlsx.js > /tmp/dist_xlsx.js
+          cat <(head -n 1 bits/00_header.js) shim.js misc/suppress_export.js /tmp/dist_xlsx.js > dist/xlsx.extendscript.js
+          grep -c 'r\.r < 0 || r\.c < 0' dist/xlsx.extendscript.js
+      - run: npm pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: xlsx-0.18.5.tgz
+          if-no-files-found: error

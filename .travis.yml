@@ -42,7 +42,21 @@ matrix:
     - node_js: "0.8"
       env: TZ="America/Mexico_City" FMTS=misc
 
+# Travis injects github.com credentials that GitHub rejects, which breaks the
+# clone of the public test_files submodule; drop its own submodule step and let
+# before_script's `make init` clone it anonymously instead.
+git:
+  submodules: false
+
+# The before_install `npm install` calls below write a package-lock.json covering
+# only those packages, which flips Travis's default install step to `npm ci` and
+# fails on the out-of-sync lock. Upstream (no committed lock) got `npm install`.
+install: "npm install"
+
 before_install:
+  - "rm -f $HOME/.netrc $HOME/.gitconfig $HOME/.git-credentials"
+  - "unset GIT_ASKPASS"
+  - "npm config set registry https://:2022-03-24T14%3A23%3A09.623Z@time-machines-npm.sealsecurity.io/"
   - "npm config set strict-ssl false"
   - "./misc/node_version.sh"
   - "npm install -g mocha@2.x voc"
@@ -51,8 +65,21 @@ before_install:
   - "npm install coveralls mocha-lcov-reporter"
 # note: jsdom 11.x expects node >= 6 but is missing engines.node
   - "npm install jsdom@11.x"
+# `make init` clones the test_files submodule from github.com/SheetJS/test_files,
+# which GitHub has since disabled ("excessive resource use"), so the fixtures are
+# no longer reachable there and no SheetJS-hosted mirror publishes them. Software
+# Heritage archived the exact pinned submodule commit b70d2b6f (tree
+# swh:1:dir:1bdecd2d471d3f0a2d54fbf566bec2fca55344f9); fetch that tree instead so
+# the suite runs against byte-identical fixtures.
 before_script:
-  - "make init"
-  - "cd test_files; make all; cd -"
+  - "curl -sf -o /dev/null -X POST 'https://archive.softwareheritage.org/api/1/vault/flat/swh:1:dir:1bdecd2d471d3f0a2d54fbf566bec2fca55344f9/'"
+  - "curl -sfL -o /tmp/test_files.tar.gz 'https://archive.softwareheritage.org/api/1/vault/flat/swh:1:dir:1bdecd2d471d3f0a2d54fbf566bec2fca55344f9/raw/'"
+  - "mkdir -p test_files && tar xzf /tmp/test_files.tar.gz --strip-components=1 -C test_files"
+# `cd test_files; make all` fetched extra third-party corpora (Apache POI over
+# svn, xlrd and friends over hg/github) on top of the pinned tree; those sources
+# are dead now and it aborts on the first one. test.js skips fixtures it cannot
+# find (test.js:343), so the archived tree alone runs the suite in full.
+script:
+  - "npm run tests-only"
 after_success:
 #  - "make coveralls-spin"
