@@ -14,8 +14,8 @@ var RTF = /*#__PURE__*/(function() {
 		var o = opts || {};
 		var ws/*:Worksheet*/ = o.dense ? ([]/*:any*/) : ({}/*:any*/);
 
-		var rows = str.match(/\\trowd.*?\\row\b/g);
-		if(!rows.length) throw new Error("RTF missing table");
+		var rows = str_match_ng(str, "\\trowd", "\\row");
+		if(!rows) throw new Error("RTF missing table");
 		var range/*:Range*/ = ({s: {c:0, r:0}, e: {c:0, r:rows.length - 1}}/*:any*/);
 		rows.forEach(function(rowtf, R) {
 			if(Array.isArray(ws)) ws[R] = [];

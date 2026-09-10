@@ -2909,7 +2909,7 @@ function parse_mime(cfb, data, root) {
 	for(;di < 10; ++di) {
 		var line = data[di];
 		if(!line || line.match(/^\s*$/)) break;
-		var m = line.match(/^(.*?):\s*([^\s].*)$/);
+		var m = line.match(/^([^:]*?):\s*([^\s].*)$/);
 		if(m) switch(m[1].toLowerCase()) {
 			case "content-location": fname = m[2].trim(); break;
 			case "content-type": ctype = m[2].trim(); break;
@@ -3144,7 +3144,7 @@ document.body.removeChild(a);
 		var out = File(fname); out.open("w"); out.encoding = "binary";
 		if(Array.isArray(payload)) payload = a2s(payload);
 		out.write(payload); out.close(); return payload;
-	} catch(e) { if(!e.message || !e.message.match(/onstruct/)) throw e; }
+	} catch(e) { if(!e.message || e.message.indexOf("onstruct") == -1) throw e; }
 	throw new Error("cannot save file " + fname);
 }
 
@@ -3158,7 +3158,7 @@ function read_binary(path) {
 		var infile = File(path); infile.open("r"); infile.encoding = "binary";
 		var data = infile.read(); infile.close();
 		return data;
-	} catch(e) { if(!e.message || !e.message.match(/onstruct/)) throw e; }
+	} catch(e) { if(!e.message || e.message.indexOf("onstruct") == -1) throw e; }
 	throw new Error("Cannot access file " + path);
 }
 function keys(o) {
@@ -3314,7 +3314,7 @@ function fuzzynum(s) {
 	var wt = 1;
 	var ss = s.replace(/([\d]),([\d])/g,"$1$2").replace(/[$]/g,"").replace(/[%]/g, function() { wt *= 100; return "";});
 	if(!isNaN(v = Number(ss))) return v / wt;
-	ss = ss.replace(/[(](.*)[)]/,function($$, $1) { wt = -wt; return $1;});
+	ss = ss.replace(/[(]([^()]*)[)]/,function($$, $1) { wt = -wt; return $1;});
 	if(!isNaN(v = Number(ss))) return v / wt;
 	return v;
 }
@@ -3341,6 +3341,163 @@ var split_regex = (function() {
 		var p = str.split(re), o = [p[0]];
 		for(var i = 1; i < p.length; ++i) { o.push(def); o.push(p[i]); }
 		return o;
+	};
+})();
+
+function remove_doctype(str) {
+	var preamble = str.slice(0, 1024);
+	var si = preamble.indexOf("<!DOCTYPE");
+	if(si == -1) return str;
+	var m = str.match(/<[\w]/);
+	if(!m) return str;
+	return str.slice(0, si) + str.slice(m.index);
+}
+
+/* str.match(/<!--[\s\S]*?-->/g) --> str_match_ng(str, "<!--", "-->") */
+function str_match_ng(str, s, e) {
+  var out = [];
+
+  var si = str.indexOf(s);
+  while(si > -1) {
+    var ei = str.indexOf(e, si + s.length);
+		if(ei == -1) break;
+
+		out.push(str.slice(si, ei + e.length));
+		si = str.indexOf(s, ei + e.length);
+	}
+
+  return out.length > 0 ? out : null;
+}
+
+/* str.replace(/<!--[\s\S]*?-->/g, "") --> str_remove_ng(str, "<!--", "-->") */
+function str_remove_ng(str, s, e) {
+  var out = [], last = 0;
+
+  var si = str.indexOf(s);
+	if(si == -1) return str;
+  while(si > -1) {
+		out.push(str.slice(last, si));
+    var ei = str.indexOf(e, si + s.length);
+		if(ei == -1) break;
+
+		if((si = str.indexOf(s, (last = ei + e.length))) == -1) out.push(str.slice(last));
+	}
+
+  return out.join("");
+}
+
+/* str.match(/<tag\b[^>]*?>([\s\S]*?)</tag>/) --> str_match_xml(str, "tag") */
+var xml_boundary = { " ": 1, "\t": 1, "\r": 1, "\n": 1, ">": 1 };
+function str_match_xml(str, tag) {
+	var si = str.indexOf('<' + tag), w = tag.length + 1, L = str.length;
+	while(si >= 0 && si <= L - w && !xml_boundary[str.charAt(si + w)]) si = str.indexOf('<' + tag, si+1);
+	if(si === -1) return null;
+	var sf = str.indexOf(">", si + tag.length);
+	if(sf === -1) return null;
+	var et = "</" + tag + ">";
+	var ei = str.indexOf(et, sf);
+	if(ei == -1) return null;
+	return [str.slice(si, ei + et.length), str.slice(sf + 1, ei)];
+}
+
+/* str.match(/<(?:\w+:)?tag\b[^<>]*?>([\s\S]*?)<\/(?:\w+:)?tag>/) --> str_match_xml_ns(str, "tag") */
+var str_match_xml_ns = (function() {
+	var str_match_xml_ns_cache = {};
+	return function str_match_xml_ns(str, tag) {
+		var res = str_match_xml_ns_cache[tag];
+		if(!res) str_match_xml_ns_cache[tag] = res = [
+			new RegExp('<(?:\\w+:)?'+tag+'\\b[^<>]*>', "g"),
+			new RegExp('</(?:\\w+:)?'+tag+'>', "g")
+		];
+		res[0].lastIndex = res[1].lastIndex = 0;
+		var m = res[0].exec(str);
+		if(!m) return null;
+		var si = m.index;
+		var sf = res[0].lastIndex;
+		res[1].lastIndex = res[0].lastIndex;
+		m = res[1].exec(str);
+		if(!m) return null;
+		var ei = m.index;
+		var ef = res[1].lastIndex;
+		return [str.slice(si, ef), str.slice(sf, ei)];
+	};
+})();
+
+/* str.match(/<(?:\w+:)?tag\b[^<>]*?>([\s\S]*?)<\/(?:\w+:)?tag>/g) --> str_match_xml_ns_g(str, "tag") */
+var str_match_xml_ns_g = (function() {
+	var str_match_xml_ns_cache = {};
+	return function str_match_xml_ns(str, tag) {
+		var out = [];
+		var res = str_match_xml_ns_cache[tag];
+		if(!res) str_match_xml_ns_cache[tag] = res = [
+			new RegExp('<(?:\\w+:)?'+tag+'\\b[^<>]*>', "g"),
+			new RegExp('</(?:\\w+:)?'+tag+'>', "g")
+		];
+		res[0].lastIndex = res[1].lastIndex = 0;
+		var m;
+		while((m = res[0].exec(str))) {
+			var si = m.index;
+			res[1].lastIndex = res[0].lastIndex;
+			m = res[1].exec(str);
+			if(!m) return null;
+			var ef = res[1].lastIndex;
+			out.push(str.slice(si, ef));
+			res[0].lastIndex = res[1].lastIndex;
+		}
+		return out.length == 0 ? null : out;
+	};
+})();
+
+/* str.replace(/<(?:\w+:)?tag\b[^<>]*?>([\s\S]*?)<\/(?:\w+:)?tag>/g, "") --> str_remove_xml_ns_g(str, "tag") */
+var str_remove_xml_ns_g = (function() {
+	var str_remove_xml_ns_cache = {};
+	return function str_remove_xml_ns_g(str, tag) {
+		var out = [];
+		var res = str_remove_xml_ns_cache[tag];
+		if(!res) str_remove_xml_ns_cache[tag] = res = [
+			new RegExp('<(?:\\w+:)?'+tag+'\\b[^<>]*>', "g"),
+			new RegExp('</(?:\\w+:)?'+tag+'>', "g")
+		];
+		res[0].lastIndex = res[1].lastIndex = 0;
+		var m;
+		var si = 0, ef = 0;
+		while((m = res[0].exec(str))) {
+			si = m.index;
+			out.push(str.slice(ef, si));
+			ef = si;
+			res[1].lastIndex = res[0].lastIndex;
+			m = res[1].exec(str);
+			if(!m) return null;
+			ef = res[1].lastIndex;
+			res[0].lastIndex = res[1].lastIndex;
+		}
+		out.push(str.slice(ef));
+		return out.length == 0 ? "" : out.join("");
+	};
+})();
+
+/* str.match(/<tag\b[^<>]*?>([\s\S]*?)<\/tag>/gi) --> str_match_xml_ig(str, "tag") */
+var str_match_xml_ig = (function() {
+	var str_match_xml_ns_cache = {};
+	return function str_match_xml_ns(str, tag) {
+		var out = [];
+		var res = str_match_xml_ns_cache[tag];
+		if(!res) str_match_xml_ns_cache[tag] = res = [
+			new RegExp('<'+tag+'\\b[^<>]*>', "ig"),
+			new RegExp('</'+tag+'>', "ig")
+		];
+		res[0].lastIndex = res[1].lastIndex = 0;
+		var m;
+		while((m = res[0].exec(str))) {
+			var si = m.index;
+			res[1].lastIndex = res[0].lastIndex;
+			m = res[1].exec(str);
+			if(!m) return null;
+			var ef = res[1].lastIndex;
+			out.push(str.slice(si, ef));
+			res[0].lastIndex = res[1].lastIndex;
+		}
+		return out.length == 0 ? null : out;
 	};
 })();
 function getdatastr(data) {
@@ -3449,8 +3606,8 @@ function resolve_path(path, base) {
 	return result.join('/');
 }
 var XML_HEADER = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n';
-var attregexg=/([^"\s?>\/]+)\s*=\s*((?:")([^"]*)(?:")|(?:')([^']*)(?:')|([^'">\s]+))/g;
-var tagregex1=/<[\/\?]?[a-zA-Z0-9:_-]+(?:\s+[^"\s?>\/]+\s*=\s*(?:"[^"]*"|'[^']*'|[^'">\s=]+))*\s*[\/\?]?>/mg, tagregex2 = /<[^>]*>/g;
+var attregexg=/\s([^"\s?>\/]+)\s*=\s*((?:")([^"]*)(?:")|(?:')([^']*)(?:')|([^'">\s]+))/g;
+var tagregex1=/<[\/\?]?[a-zA-Z0-9:_-]+(?:\s+[^"\s?<>\/]+\s*=\s*(?:"[^"]*"|'[^']*'|[^'"<>\s=]+))*\s*[\/\?]?>/mg, tagregex2 = /<[^<>]*>/g;
 var tagregex = XML_HEADER.match(tagregex1) ? tagregex1 : tagregex2;
 var nsregex=/<\w*:/, nsregex2 = /<(\/?)\w+:/;
 function parsexmltag(tag, skip_root, skip_LC) {
@@ -3461,7 +3618,7 @@ function parsexmltag(tag, skip_root, skip_LC) {
 	if(eq === tag.length) return z;
 	var m = tag.match(attregexg), j=0, v="", i=0, q="", cc="", quot = 1;
 	if(m) for(i = 0; i != m.length; ++i) {
-		cc = m[i];
+		cc = m[i].slice(1);
 		for(c=0; c != cc.length; ++c) if(cc.charCodeAt(c) === 61) break;
 		q = cc.slice(0,c).trim();
 		while(cc.charCodeAt(c+1) == 32) ++c;
@@ -3605,16 +3762,6 @@ var utf8write = has_buf ? function(data) { return Buffer_from(data, 'utf8').toSt
 	return out.join("");
 };
 
-// matches <foo>...</foo> extracts content
-var matchtag = (function() {
-	var mtcache = ({});
-	return function matchtag(f,g) {
-		var t = f+"|"+(g||"");
-		if(mtcache[t]) return mtcache[t];
-		return (mtcache[t] = new RegExp('<(?:\\w+:)?'+f+'(?: xml:space="preserve")?(?:[^>]*)>([\\s\\S]*?)</(?:\\w+:)?'+f+'>',((g||""))));
-	};
-})();
-
 var htmldecode = (function() {
 	var entities = [
 		['nbsp', ' '], ['middot', '·'],
@@ -3625,30 +3772,25 @@ var htmldecode = (function() {
 				// Remove new lines and spaces from start of content
 				.replace(/^[\t\n\r ]+/, "")
 				// Remove new lines and spaces from end of content
-				.replace(/[\t\n\r ]+$/,"")
+				.replace(/(^|[^\t\n\r ])[\t\n\r ]+$/,"$1")
 				// Added line which removes any white space characters after and before html tags
-				.replace(/>\s+/g,">").replace(/\s+</g,"<")
+				.replace(/>\s+/g,">").replace(/\b\s+</g,"<")
 				// Replace remaining new lines and spaces with space
 				.replace(/[\t\n\r ]+/g, " ")
 				// Replace <br> tags with new lines
 				.replace(/<\s*[bB][rR]\s*\/?>/g,"\n")
 				// Strip HTML elements
-				.replace(/<[^>]*>/g,"");
+				.replace(/<[^<>]*>/g,"");
 		for(var i = 0; i < entities.length; ++i) o = o.replace(entities[i][0], entities[i][1]);
 		return o;
 	};
 })();
 
-var vtregex = (function(){ var vt_cache = {};
-	return function vt_regex(bt) {
-		if(vt_cache[bt] !== undefined) return vt_cache[bt];
-		return (vt_cache[bt] = new RegExp("<(?:vt:)?" + bt + ">([\\s\\S]*?)</(?:vt:)?" + bt + ">", 'g') );
-};})();
-var vtvregex = /<\/?(?:vt:)?variant>/g, vtmregex = /<(?:vt:)([^>]*)>([\s\S]*)</;
+var vtvregex = /<\/?(?:vt:)?variant>/g, vtmregex = /<(?:vt:)([^<"'>]*)>([\s\S]*)</;
 function parseVector(data, opts) {
 	var h = parsexmltag(data);
 
-	var matches = data.match(vtregex(h.baseType))||[];
+	var matches = str_match_xml_ns_g(data, h.baseType)||[];
 	var res = [];
 	if(matches.length != h.size) {
 		if(opts.WTF) throw new Error("unexpected vector length " + matches.length + " != " + h.size);
@@ -5372,22 +5514,12 @@ var CORE_PROPS = [
 	["dcterms:modified", "ModifiedDate", 'date']
 ];
 
-var CORE_PROPS_REGEX = (function() {
-	var r = new Array(CORE_PROPS.length);
-	for(var i = 0; i < CORE_PROPS.length; ++i) {
-		var f = CORE_PROPS[i];
-		var g = "(?:"+ f[0].slice(0,f[0].indexOf(":")) +":)"+ f[0].slice(f[0].indexOf(":")+1);
-		r[i] = new RegExp("<" + g + "[^>]*>([\\s\\S]*?)<\/" + g + ">");
-	}
-	return r;
-})();
-
 function parse_core_props(data) {
 	var p = {};
 	data = utf8read(data);
 
 	for(var i = 0; i < CORE_PROPS.length; ++i) {
-		var f = CORE_PROPS[i], cur = data.match(CORE_PROPS_REGEX[i]);
+		var f = CORE_PROPS[i], cur = str_match_xml(data, f[0]);
 		if(cur != null && cur.length > 0) p[f[1]] = unescapexml(cur[1]);
 		if(f[2] === 'date' && p[f[1]]) p[f[1]] = parseDate(p[f[1]]);
 	}
@@ -5503,12 +5635,12 @@ function parse_ext_props(data, p, opts) {
 	data = utf8read(data);
 
 	EXT_PROPS.forEach(function(f) {
-		var xml = (data.match(matchtag(f[0]))||[])[1];
+		var xml = (str_match_xml_ns(data, f[0])||[])[1];
 		switch(f[2]) {
 			case "string": if(xml) p[f[1]] = unescapexml(xml); break;
 			case "bool": p[f[1]] = xml === "true"; break;
 			case "raw":
-				var cur = data.match(new RegExp("<" + f[0] + "[^>]*>([\\s\\S]*?)<\/" + f[0] + ">"));
+				var cur = str_match_xml(data, f[0]);
 				if(cur && cur.length > 0) q[f[1]] = cur[1];
 				break;
 		}
@@ -5546,7 +5678,7 @@ function write_ext_props(cp) {
 	return o.join("");
 }
 /* 15.2.12.2 Custom File Properties Part */
-var custregex = /<[^>]+>[^<]*/g;
+var custregex = /<[^<>]+>[^<]*/g;
 function parse_cust_props(data, opts) {
 	var p = {}, name = "";
 	var m = data.match(custregex);
@@ -5931,8 +6063,8 @@ function parse_PropertySet(blob, PIDSI) {
 				/* [MS-OSHARED] 2.3.3.2.3.1.2 + PROPVARIANT */
 				switch(blob[blob.l]) {
 					case 0x41 /*VT_BLOB*/: blob.l += 4; val = parse_BLOB(blob); break;
-					case 0x1E /*VT_LPSTR*/: blob.l += 4; val = parse_VtString(blob, blob[blob.l-4]).replace(/\u0000+$/,""); break;
-					case 0x1F /*VT_LPWSTR*/: blob.l += 4; val = parse_VtString(blob, blob[blob.l-4]).replace(/\u0000+$/,""); break;
+					case 0x1E /*VT_LPSTR*/: blob.l += 4; val = parse_VtString(blob, blob[blob.l-4]).replace(/(^|[^\u0000])\u0000+$/,"$1"); break;
+					case 0x1F /*VT_LPWSTR*/: blob.l += 4; val = parse_VtString(blob, blob[blob.l-4]).replace(/(^|[^\u0000])\u0000+$/,"$1"); break;
 					case 0x03 /*VT_I4*/: blob.l += 4; val = blob.read_shift(4, 'i'); break;
 					case 0x13 /*VT_UI4*/: blob.l += 4; val = blob.read_shift(4); break;
 					case 0x05 /*VT_R8*/: blob.l += 4; val = blob.read_shift(8, 'f'); break;
@@ -7553,7 +7685,7 @@ var fields = [], field = ({});
 	var ww = l7 ? 32 : 11;
 	while(d.l < hend && d[d.l] != 0x0d) {
 		field = ({});
-		field.name = $cptable.utils.decode(current_cp, d.slice(d.l, d.l+ww)).replace(/[\u0000\r\n].*$/g,"");
+		field.name = $cptable.utils.decode(current_cp, d.slice(d.l, d.l+ww)).replace(/[\u0000\r\n][\S\s]*$/g,"");
 		d.l += ww;
 		field.type = String.fromCharCode(d.read_shift(1));
 		if(ft != 0x02 && !l7) field.offset = d.read_shift(4);
@@ -7611,7 +7743,7 @@ var fields = [], field = ({});
 			switch(fields[C].type) {
 				case 'C':
 					// NOTE: it is conventional to write '  /  /  ' for empty dates
-					if(s.trim().length) out[R][C] = s.replace(/\s+$/,"");
+					if(s.trim().length) out[R][C] = s.replace(/([^\s])\s+$/,"$1");
 					break;
 				case 'D':
 					if(s.length === 8) out[R][C] = new Date(+s.slice(0,4), +s.slice(4,6)-1, +s.slice(6,8));
@@ -8452,7 +8584,7 @@ function read_wb_ID(d, opts) {
 		return out;
 	} catch(e) {
 		o.WTF = OLD_WTF;
-		if(!e.message.match(/SYLK bad record ID/) && OLD_WTF) throw e;
+		if((e.message.indexOf("SYLK bad record ID") == -1) && OLD_WTF) throw e;
 		return PRN.to_workbook(d, opts);
 	}
 }
@@ -9389,15 +9521,14 @@ function parse_rpr(rpr) {
 }
 
 var parse_rs = (function() {
-	var tregex = matchtag("t"), rpregex = matchtag("rPr");
 	/* 18.4.4 r CT_RElt */
 	function parse_r(r) {
 		/* 18.4.12 t ST_Xstring */
-		var t = r.match(tregex)/*, cp = 65001*/;
+		var t = str_match_xml_ns(r, "t")/*, cp = 65001*/;
 		if(!t) return {t:"s", v:""};
 
 		var o = ({t:'s', v:unescapexml(t[1])});
-		var rpr = r.match(rpregex);
+		var rpr = str_match_xml_ns(r, "rPr");
 		if(rpr) o.s = parse_rpr(rpr[1]);
 		return o;
 	}
@@ -9450,8 +9581,7 @@ var rs_to_html = (function parse_rs_factory() {
 })();
 
 /* 18.4.8 si CT_Rst */
-var sitregex = /<(?:\w+:)?t[^>]*>([^<]*)<\/(?:\w+:)?t>/g, sirregex = /<(?:\w+:)?r>/;
-var sirphregex = /<(?:\w+:)?rPh.*?>([\s\S]*?)<\/(?:\w+:)?rPh>/g;
+var sitregex = /<(?:\w+:)?t\b[^<>]*>([^<]*)<\/(?:\w+:)?t>/g, sirregex = /<(?:\w+:)?r>/;
 function parse_si(x, opts) {
 	var html = opts ? opts.cellHTML : true;
 	var z = {};
@@ -9467,7 +9597,7 @@ function parse_si(x, opts) {
 	/* 18.4.4 r CT_RElt (Rich Text Run) */
 	else if((/*y = */x.match(sirregex))) {
 		z.r = utf8read(x);
-		z.t = unescapexml(utf8read((x.replace(sirphregex, '').match(sitregex)||[]).join("").replace(tagregex,"")));
+		z.t = unescapexml(utf8read((str_remove_xml_ns_g(x, "rPh").match(sitregex)||[]).join("").replace(tagregex,"")));
 		if(html) z.h = rs_to_html(parse_rs(z.r));
 	}
 	/* 18.4.3 phoneticPr CT_PhoneticPr (TODO: needed for Asian support) */
@@ -9476,21 +9606,20 @@ function parse_si(x, opts) {
 }
 
 /* 18.4 Shared String Table */
-var sstr0 = /<(?:\w+:)?sst([^>]*)>([\s\S]*)<\/(?:\w+:)?sst>/;
 var sstr1 = /<(?:\w+:)?(?:si|sstItem)>/g;
 var sstr2 = /<\/(?:\w+:)?(?:si|sstItem)>/;
 function parse_sst_xml(data, opts) {
 	var s = ([]), ss = "";
 	if(!data) return s;
 	/* 18.4.9 sst CT_Sst */
-	var sst = data.match(sstr0);
+	var sst = str_match_xml_ns(data, "sst");
 	if(sst) {
-		ss = sst[2].replace(sstr1,"").split(sstr2);
+		ss = sst[1].replace(sstr1,"").split(sstr2);
 		for(var i = 0; i != ss.length; ++i) {
 			var o = parse_si(ss[i].trim(), opts);
 			if(o != null) s[s.length] = o;
 		}
-		sst = parsexmltag(sst[1]); s.Count = sst.count; s.Unique = sst.uniqueCount;
+		sst = parsexmltag(sst[0].slice(0, sst[0].indexOf(">"))); s.Count = sst.count; s.Unique = sst.uniqueCount;
 	}
 	return s;
 }
@@ -9899,8 +10028,8 @@ var RTF = (function() {
 		var o = opts || {};
 		var ws = o.dense ? ([]) : ({});
 
-		var rows = str.match(/\\trowd.*?\\row\b/g);
-		if(!rows.length) throw new Error("RTF missing table");
+		var rows = str_match_ng(str, "\\trowd", "\\row");
+		if(!rows) throw new Error("RTF missing table");
 		var range = ({s: {c:0, r:0}, e: {c:0, r:rows.length - 1}});
 		rows.forEach(function(rowtf, R) {
 			if(Array.isArray(ws)) ws[R] = [];
@@ -10082,7 +10211,7 @@ function parse_borders(t, styles, themes, opts) {
 	styles.Borders = [];
 	var border = {};
 	var pass = false;
-	(t[0].match(tagregex)||[]).forEach(function(x) {
+	(t.match(tagregex)||[]).forEach(function(x) {
 		var y = parsexmltag(x);
 		switch(strip_ns(y[0])) {
 			case '<borders': case '<borders>': case '</borders>': break;
@@ -10157,7 +10286,7 @@ function parse_fills(t, styles, themes, opts) {
 	styles.Fills = [];
 	var fill = {};
 	var pass = false;
-	(t[0].match(tagregex)||[]).forEach(function(x) {
+	(t.match(tagregex)||[]).forEach(function(x) {
 		var y = parsexmltag(x);
 		switch(strip_ns(y[0])) {
 			case '<fills': case '<fills>': case '</fills>': break;
@@ -10223,7 +10352,7 @@ function parse_fonts(t, styles, themes, opts) {
 	styles.Fonts = [];
 	var font = {};
 	var pass = false;
-	(t[0].match(tagregex)||[]).forEach(function(x) {
+	(t.match(tagregex)||[]).forEach(function(x) {
 		var y = parsexmltag(x);
 		switch(strip_ns(y[0])) {
 			case '<fonts': case '<fonts>': case '</fonts>': break;
@@ -10343,7 +10472,7 @@ function parse_numFmts(t, styles, opts) {
 	styles.NumberFmt = [];
 	var k/*Array<number>*/ = (keys(table_fmt));
 	for(var i=0; i < k.length; ++i) styles.NumberFmt[k[i]] = table_fmt[k[i]];
-	var m = t[0].match(tagregex);
+	var m = t.match(tagregex);
 	if(!m) return;
 	for(i=0; i < m.length; ++i) {
 		var y = parsexmltag(m[i]);
@@ -10384,7 +10513,7 @@ function parse_cellXfs(t, styles, opts) {
 	styles.CellXf = [];
 	var xf;
 	var pass = false;
-	(t[0].match(tagregex)||[]).forEach(function(x) {
+	(t.match(tagregex)||[]).forEach(function(x) {
 		var y = parsexmltag(x), i = 0;
 		switch(strip_ns(y[0])) {
 			case '<cellXfs': case '<cellXfs>': case '<cellXfs/>': case '</cellXfs>': break;
@@ -10449,36 +10578,31 @@ function write_cellXfs(cellXfs) {
 
 /* 18.8 Styles CT_Stylesheet*/
 var parse_sty_xml= (function make_pstyx() {
-var numFmtRegex = /<(?:\w+:)?numFmts([^>]*)>[\S\s]*?<\/(?:\w+:)?numFmts>/;
-var cellXfRegex = /<(?:\w+:)?cellXfs([^>]*)>[\S\s]*?<\/(?:\w+:)?cellXfs>/;
-var fillsRegex = /<(?:\w+:)?fills([^>]*)>[\S\s]*?<\/(?:\w+:)?fills>/;
-var fontsRegex = /<(?:\w+:)?fonts([^>]*)>[\S\s]*?<\/(?:\w+:)?fonts>/;
-var bordersRegex = /<(?:\w+:)?borders([^>]*)>[\S\s]*?<\/(?:\w+:)?borders>/;
 
 return function parse_sty_xml(data, themes, opts) {
 	var styles = {};
 	if(!data) return styles;
-	data = data.replace(/<!--([\s\S]*?)-->/mg,"").replace(/<!DOCTYPE[^\[]*\[[^\]]*\]>/gm,"");
+	data = remove_doctype(str_remove_ng(data, "<!--", "-->"));
 	/* 18.8.39 styleSheet CT_Stylesheet */
 	var t;
 
 	/* 18.8.31 numFmts CT_NumFmts ? */
-	if((t=data.match(numFmtRegex))) parse_numFmts(t, styles, opts);
+	if((t=str_match_xml_ns(data, "numFmts"))) parse_numFmts(t[0], styles, opts);
 
 	/* 18.8.23 fonts CT_Fonts ? */
-	if((t=data.match(fontsRegex))) parse_fonts(t, styles, themes, opts);
+	if((t=str_match_xml_ns(data, "fonts"))) parse_fonts(t[0], styles, themes, opts);
 
 	/* 18.8.21 fills CT_Fills ? */
-	if((t=data.match(fillsRegex))) parse_fills(t, styles, themes, opts);
+	if((t=str_match_xml_ns(data, "fills"))) parse_fills(t[0], styles, themes, opts);
 
 	/* 18.8.5  borders CT_Borders ? */
-	if((t=data.match(bordersRegex))) parse_borders(t, styles, themes, opts);
+	if((t=str_match_xml_ns(data, "borders"))) parse_borders(t[0], styles, themes, opts);
 
 	/* 18.8.9  cellStyleXfs CT_CellStyleXfs ? */
 	/* 18.8.8  cellStyles CT_CellStyles ? */
 
 	/* 18.8.10 cellXfs CT_CellXfs ? */
-	if((t=data.match(cellXfRegex))) parse_cellXfs(t, styles, opts);
+	if((t=str_match_xml_ns(data, "cellXfs"))) parse_cellXfs(t[0], styles, opts);
 
 	/* 18.8.15 dxfs CT_Dxfs ? */
 	/* 18.8.42 tableStyles CT_TableStyles ? */
@@ -10966,30 +11090,24 @@ function parse_fontScheme() { }
 /* 20.1.4.1.15 fmtScheme CT_StyleMatrix */
 function parse_fmtScheme() { }
 
-var clrsregex = /<a:clrScheme([^>]*)>[\s\S]*<\/a:clrScheme>/;
-var fntsregex = /<a:fontScheme([^>]*)>[\s\S]*<\/a:fontScheme>/;
-var fmtsregex = /<a:fmtScheme([^>]*)>[\s\S]*<\/a:fmtScheme>/;
-
 /* 20.1.6.10 themeElements CT_BaseStyles */
 function parse_themeElements(data, themes, opts) {
 	themes.themeElements = {};
 
 	var t;
 
-	[
-		/* clrScheme CT_ColorScheme */
-		['clrScheme', clrsregex, parse_clrScheme],
-		/* fontScheme CT_FontScheme */
-		['fontScheme', fntsregex, parse_fontScheme],
-		/* fmtScheme CT_StyleMatrix */
-		['fmtScheme', fmtsregex, parse_fmtScheme]
-	].forEach(function(m) {
-		if(!(t=data.match(m[1]))) throw new Error(m[0] + ' not found in themeElements');
-		m[2](t, themes, opts);
-	});
-}
+	/* clrScheme CT_ColorScheme */
+	if(!(t=str_match_xml(data, "a:clrScheme"))) throw new Error('clrScheme not found in themeElements');
+	parse_clrScheme(t, themes, opts);
 
-var themeltregex = /<a:themeElements([^>]*)>[\s\S]*<\/a:themeElements>/;
+	/* fontScheme CT_FontScheme */
+	if(!(t=str_match_xml(data, "a:fontScheme"))) throw new Error('fontScheme not found in themeElements');
+	parse_fontScheme(t, themes, opts);
+
+	/* fmtScheme CT_StyleMatrix */
+	if(!(t=str_match_xml(data, "a:fmtScheme"))) throw new Error('fmtScheme not found in themeElements');
+	parse_fmtScheme(t, themes, opts);
+}
 
 /* 14.2.7 Theme Part */
 function parse_theme_xml(data, opts) {
@@ -11000,7 +11118,7 @@ function parse_theme_xml(data, opts) {
 	var themes = {};
 
 	/* themeElements CT_BaseStyles */
-	if(!(t=data.match(themeltregex))) throw new Error('themeElements not found in theme');
+	if(!(t=str_match_xml(data, "a:themeElements"))) throw new Error('themeElements not found in theme');
 	parse_themeElements(t[0], themes, opts);
 	themes.raw = data;
 	return themes;
@@ -11581,7 +11699,7 @@ function parse_drawing(data, rels) {
 	   the actual type is based on the URI of the graphicData
 		TODO: handle embedded charts and other types of graphics
 	*/
-	var id = (data.match(/<c:chart [^>]*r:id="([^"]*)"/)||["",""])[1];
+	var id = (data.match(/<c:chart [^<>]*r:id="([^<>"]*)"/)||["",""])[1];
 
 	return rels['!id'][id].Target;
 }
@@ -11683,22 +11801,22 @@ function parse_comments_xml(data, opts) {
 	if(data.match(/<(?:\w+:)?comments *\/>/)) return [];
 	var authors = [];
 	var commentList = [];
-	var authtag = data.match(/<(?:\w+:)?authors>([\s\S]*)<\/(?:\w+:)?authors>/);
+	var authtag = str_match_xml_ns(data, "authors");
 	if(authtag && authtag[1]) authtag[1].split(/<\/\w*:?author>/).forEach(function(x) {
 		if(x === "" || x.trim() === "") return;
-		var a = x.match(/<(?:\w+:)?author[^>]*>(.*)/);
+		var a = x.match(/<(?:\w+:)?author[^<>]*>(.*)/);
 		if(a) authors.push(a[1]);
 	});
-	var cmnttag = data.match(/<(?:\w+:)?commentList>([\s\S]*)<\/(?:\w+:)?commentList>/);
+	var cmnttag = str_match_xml_ns(data, "commentList");
 	if(cmnttag && cmnttag[1]) cmnttag[1].split(/<\/\w*:?comment>/).forEach(function(x) {
 		if(x === "" || x.trim() === "") return;
-		var cm = x.match(/<(?:\w+:)?comment[^>]*>/);
+		var cm = x.match(/<(?:\w+:)?comment[^<>]*>/);
 		if(!cm) return;
 		var y = parsexmltag(cm[0]);
 		var comment = ({ author: y.authorId && authors[y.authorId] || "sheetjsghost", ref: y.ref, guid: y.guid });
 		var cell = decode_cell(y.ref);
 		if(opts.sheetRows && opts.sheetRows <= cell.r) return;
-		var textMatch = x.match(/<(?:\w+:)?text>([\s\S]*)<\/(?:\w+:)?text>/);
+		var textMatch = str_match_xml_ns(x, "text");
 		var rt = !!textMatch && !!textMatch[1] && parse_si(textMatch[1]) || {r:"",t:"",h:""};
 		comment.r = rt.r;
 		if(rt.r == "<t></t>") rt.t = rt.h = "";
@@ -11967,7 +12085,7 @@ function fill_vba_xls(cfb, vba) {
   vba.FullPaths.forEach(function(p, i) {
     if (i == 0)
       return;
-    var newpath = p.replace(/[^\/]*[\/]/, "/_VBA_PROJECT_CUR/");
+    var newpath = p.replace(/^[\/]*[^\/]*[\/]/, "/_VBA_PROJECT_CUR/");
     if (newpath.slice(-1) !== "/")
       CFB.utils.cfb_add(cfb, newpath, vba.FileIndex[i].content);
   });
@@ -14503,14 +14621,14 @@ function parse_ws_xml_dim(ws, s) {
 	var d = safe_decode_range(s);
 	if(d.s.r<=d.e.r && d.s.c<=d.e.c && d.s.r>=0 && d.s.c>=0) ws["!ref"] = encode_range(d);
 }
-var mergecregex = /<(?:\w:)?mergeCell ref="[A-Z0-9:]+"\s*[\/]?>/g;
+var mergecregex = /<(?:\w+:)?mergeCell ref="[A-Z0-9:]+"\s*[\/]?>/g;
 var sheetdataregex = /<(?:\w+:)?sheetData[^>]*>([\s\S]*)<\/(?:\w+:)?sheetData>/;
-var hlinkregex = /<(?:\w:)?hyperlink [^>]*>/mg;
+var hlinkregex = /<(?:\w+:)?hyperlink [^<>]*>/mg;
 var dimregex = /"(\w*:\w*)"/;
-var colregex = /<(?:\w:)?col\b[^>]*[\/]?>/g;
+var colregex = /<(?:\w+:)?col\b[^<>]*[\/]?>/g;
 var afregex = /<(?:\w:)?autoFilter[^>]*([\/]|>([\s\S]*)<\/(?:\w:)?autoFilter)>/g;
-var marginregex= /<(?:\w:)?pageMargins[^>]*\/>/g;
-var sheetprregex = /<(?:\w:)?sheetPr\b(?:[^>a-z][^>]*)?\/>/;
+var marginregex= /<(?:\w+:)?pageMargins[^<>]*\/>/g;
+var sheetprregex = /<(?:\w+:)?sheetPr\b(?:[^<>a-z][^<>]*)?\/>/;
 var sheetprregex2= /<(?:\w:)?sheetPr[^>]*(?:[\/]|>([\s\S]*)<\/(?:\w:)?sheetPr)>/;
 var svsregex = /<(?:\w:)?sheetViews[^>]*(?:[\/]|>([\s\S]*)<\/(?:\w:)?sheetViews)>/;
 
@@ -14737,7 +14855,7 @@ function write_ws_xml_autofilter(data, ws, wb, idx) {
 
 /* 18.3.1.88 sheetViews CT_SheetViews */
 /* 18.3.1.87 sheetView CT_SheetView */
-var sviewregex = /<(?:\w:)?sheetView(?:[^>a-z][^>]*)?\/?>/;
+var sviewregex = /<(?:\w:)?sheetView(?:[^<>a-z][^<>]*)?\/?>/;
 function parse_ws_xml_sheetviews(data, wb) {
 	if(!wb.Views) wb.Views = [{}];
 	(data.match(sviewregex)||[]).forEach(function(r, i) {
@@ -14807,9 +14925,8 @@ function write_ws_xml_cell(cell, ref, ws, opts) {
 
 var parse_ws_xml_data = (function() {
 	var cellregex = /<(?:\w+:)?c[ \/>]/, rowregex = /<\/(?:\w+:)?row>/;
-	var rregex = /r=["']([^"']*)["']/, isregex = /<(?:\w+:)?is>([\S\s]*?)<\/(?:\w+:)?is>/;
+	var rregex = /r=["']([^"']*)["']/;
 	var refregex = /ref=["']([^"']*)["']/;
-	var match_v = matchtag("v"), match_f = matchtag("f");
 
 return function parse_ws_xml_data(sdata, s, opts, guess, themes, styles) {
 	var ri = 0, x = "", cells = [], cref = [], idx=0, i=0, cc=0, d="", p;
@@ -14885,9 +15002,9 @@ return function parse_ws_xml_data(sdata, s, opts, guess, themes, styles) {
 			d = x.slice(i);
 			p = ({t:""});
 
-			if((cref=d.match(match_v))!= null && cref[1] !== '') p.v=unescapexml(cref[1]);
+			if((cref=str_match_xml_ns(d, "v"))!= null && cref[1] !== '') p.v=unescapexml(cref[1]);
 			if(opts.cellFormula) {
-				if((cref=d.match(match_f))!= null && cref[1] !== '') {
+				if((cref=str_match_xml_ns(d, "f"))!= null && cref[1] !== '') {
 					/* TODO: match against XLSXFutureFunctions */
 					p.f=unescapexml(utf8read(cref[1])).replace(/\r\n/g, "\n");
 					if(!opts.xlfn) p.f = _xlfn(p.f);
@@ -14901,7 +15018,7 @@ return function parse_ws_xml_data(sdata, s, opts, guess, themes, styles) {
 						if(!opts.xlfn) ___f = _xlfn(___f);
 						sharedf[parseInt(ftag.si, 10)] = [ftag, ___f, tag.r];
 					}
-				} else if((cref=d.match(/<f[^>]*\/>/))) {
+				} else if((cref=d.match(/<f[^<>]*\/>/))) {
 					ftag = parsexmltag(cref[0]);
 					if(sharedf[ftag.si]) p.f = shift_formula_xlsx(sharedf[ftag.si][1], sharedf[ftag.si][2]/*[0].ref*/, tag.r);
 				}
@@ -14947,7 +15064,7 @@ return function parse_ws_xml_data(sdata, s, opts, guess, themes, styles) {
 					if(opts.cellHTML) p.h = escapehtml(p.v);
 					break;
 				case 'inlineStr':
-					cref = d.match(isregex);
+					cref = str_match_xml_ns(d, "is");
 					p.t = 's';
 					if(cref != null && (sstr = parse_si(cref[1]))) {
 						p.v = sstr.t;
@@ -15105,7 +15222,7 @@ ws['!links'].forEach(function(l) {
 			if(!l[1].Target) return;
 			rel = ({"ref":l[0]});
 			if(l[1].Target.charAt(0) != "#") {
-				rId = add_rels(rels, -1, escapexml(l[1].Target).replace(/#.*$/, ""), RELS.HLINK);
+				rId = add_rels(rels, -1, escapexml(l[1].Target).replace(/#[\s\S]*$/, ""), RELS.HLINK);
 				rel["r:id"] = "rId"+rId;
 			}
 			if((relc = l[1].Target.indexOf("#")) > -1) rel.location = escapexml(l[1].Target.slice(relc+1));
@@ -16064,7 +16181,7 @@ function write_HLINKS(ba, ws, rels) {
 	/* *BrtHLink */
 	ws['!links'].forEach(function(l) {
 		if(!l[1].Target) return;
-		var rId = add_rels(rels, -1, l[1].Target.replace(/#.*$/, ""), RELS.HLINK);
+		var rId = add_rels(rels, -1, l[1].Target.replace(/#[\s\S]*$/, ""), RELS.HLINK);
 		write_record(ba, 0x01EE /* BrtHLink */, write_BrtHLink(l, rId));
 	});
 	delete ws['!links'];
@@ -16191,16 +16308,16 @@ function parse_Cache(data) {
 	var f;
 
 	/* 21.2.2.150 pt CT_NumVal */
-	(data.match(/<c:pt idx="(\d*)">(.*?)<\/c:pt>/mg)||[]).forEach(function(pt) {
-		var q = pt.match(/<c:pt idx="(\d*?)"><c:v>(.*)<\/c:v><\/c:pt>/);
+	(data.match(/<c:pt idx="(\d*)"[^<>\/]*><c:v>([^<]*)<\/c:v><\/c:pt>/mg)||[]).forEach(function(pt) {
+		var q = pt.match(/<c:pt idx="(\d*)"[^<>\/]*><c:v>([^<]*)<\/c:v><\/c:pt>/);
 		if(!q) return;
 		col[+q[1]] = num ? +q[2] : q[2];
 	});
 
 	/* 21.2.2.71 formatCode CT_Xstring */
-	var nf = unescapexml((data.match(/<c:formatCode>([\s\S]*?)<\/c:formatCode>/) || ["","General"])[1]);
+	var nf = unescapexml((str_match_xml(data, "c:formatCode") || ["","General"])[1]);
 
-	(data.match(/<c:f>(.*?)<\/c:f>/mg)||[]).forEach(function(F) { f = F.replace(/<.*?>/g,""); });
+	(str_match_ng(data, "<c:f>", "</c:f>")||[]).forEach(function(F) { f = F.replace(/<[^<>]*>/g,""); });
 
 	return [col, nf, f];
 }
@@ -16215,7 +16332,7 @@ function parse_chart(data, name, opts, rels, wb, csheet) {
 	var refguess = {s: {r:2000000, c:2000000}, e: {r:0, c:0} };
 
 	/* 21.2.2.120 numCache CT_NumData */
-	(data.match(/<c:numCache>[\s\S]*?<\/c:numCache>/gm)||[]).forEach(function(nc) {
+	(str_match_ng(data, "<c:numCache>", "</c:numCache>")||[]).forEach(function(nc) {
 		var cache = parse_Cache(nc);
 		refguess.s.r = refguess.s.c = 0;
 		refguess.e.c = C;
@@ -17110,8 +17227,8 @@ function write_cc(data, name:string, opts) {
 function write_xlmeta(name) {
 	return (name.slice(-4)===".bin" ? write_xlmeta_bin : write_xlmeta_xml)();
 }
-var attregexg2=/([\w:]+)=((?:")([^"]*)(?:")|(?:')([^']*)(?:'))/g;
-var attregex2=/([\w:]+)=((?:")(?:[^"]*)(?:")|(?:')(?:[^']*)(?:'))/;
+var attregexg2=/\b((?:\w+:)?[\w]+)=((?:")([^"]*)(?:")|(?:')([^']*)(?:'))/g;
+var attregex2=/\b((?:\w+:)?[\w]+)=((?:")(?:[^"]*)(?:")|(?:')(?:[^']*)(?:'))/;
 function xlml_parsexmltag(tag, skip_root) {
 	var words = tag.split(/\s+/);
 	var z = ([]); if(!skip_root) z[0] = words[0];
@@ -17221,7 +17338,7 @@ function parse_xlml_data(xml, ss, data, cell, base, styles, csty, row, arrayf, o
 			break;
 		case 'String':
 			cell.t = 's'; cell.r = xlml_fixstr(unescapexml(xml));
-			cell.v = (xml.indexOf("<") > -1 ? unescapexml(ss||xml).replace(/<.*?>/g, "") : cell.r); // todo: BR etc
+			cell.v = (xml.indexOf("<") > -1 ? unescapexml(ss||xml).replace(/<[^<>]*>/g, "") : cell.r); // todo: BR etc
 			break;
 		case 'DateTime':
 			if(xml.slice(-1) != "Z") xml += "Z";
@@ -17328,7 +17445,7 @@ function parse_xlml_xml(d, _opts) {
 	var rowinfo = [], rowobj = {}, cc = 0, rr = 0;
 	var Workbook = ({ Sheets:[], WBProps:{date1904:false} }), wsprops = {};
 	xlmlregex.lastIndex = 0;
-	str = str.replace(/<!--([\s\S]*?)-->/mg,"");
+	str = str_remove_ng(str, "<!--", "-->");
 	var raw_Rn3 = "";
 	while((Rn = xlmlregex.exec(str))) switch((Rn[3] = (raw_Rn3 = Rn[3]).toLowerCase())) {
 		case 'data' /*case 'Data'*/:
@@ -20793,12 +20910,12 @@ function html_to_sheet(str, _opts) {
 	var opts = _opts || {};
 	if(DENSE != null && opts.dense == null) opts.dense = DENSE;
 	var ws = opts.dense ? ([]) : ({});
-	str = str.replace(/<!--.*?-->/g, "");
+	str = str_remove_ng(str, "<!--", "-->");
 	var mtch = str.match(/<table/i);
 	if(!mtch) throw new Error("Invalid HTML: could not find <table>");
 	var mtch2 = str.match(/<\/table/i);
 	var i = mtch.index, j = mtch2 && mtch2.index || str.length;
-	var rows = split_regex(str.slice(i, j), /(:?<tr[^>]*>)/i, "<tr>");
+	var rows = split_regex(str.slice(i, j), /(:?<tr[^<>]*>)/i, "<tr>");
 	var R = -1, C = 0, RS = 0, CS = 0;
 	var range = {s:{r:10000000, c:10000000},e:{r:0,c:0}};
 	var merges = [];
@@ -20884,7 +21001,7 @@ var HTML_BEGIN = '<html><head><meta charset="utf-8"/><title>SheetJS Table Export
 var HTML_END = '</body></html>';
 
 function html_to_workbook(str, opts) {
-	var mtch = str.match(/<table[\s\S]*?>[\s\S]*?<\/table>/gi);
+	var mtch = str_match_xml_ig(str, "table");
 	if(!mtch || mtch.length == 0) throw new Error("Invalid HTML: could not find <table>");
 	if(mtch.length == 1) return sheet_to_workbook(html_to_sheet(mtch[0], opts), opts);
 	var wb = book_new();
@@ -21025,9 +21142,9 @@ function parse_text_p(text) {
 		.replace(/[\t\r\n]/g, " ").trim().replace(/ +/g, " ")
 		.replace(/<text:s\/>/g," ")
 		.replace(/<text:s text:c="(\d+)"\/>/g, function($$,$1) { return Array(parseInt($1,10)+1).join(" "); })
-		.replace(/<text:tab[^>]*\/>/g,"\t")
+		.replace(/<text:tab[^<>]*\/>/g,"\t")
 		.replace(/<text:line-break\/>/g,"\n");
-	var v = unescapexml(fixed.replace(/<[^>]*>/g,""));
+	var v = unescapexml(fixed.replace(/<[^<>]*>/g,""));
 
 	return [v];
 }
@@ -21077,8 +21194,8 @@ function parse_content_xml(d, _opts) {
 		var isstub = false, intable = false;
 		var i = 0;
 		xlmlregex.lastIndex = 0;
-		str = str.replace(/<!--([\s\S]*?)-->/mg,"").replace(/<!DOCTYPE[^\[]*\[[^\]]*\]>/gm,"");
-		while((Rn = xlmlregex.exec(str))) switch((Rn[3]=Rn[3].replace(/_.*$/,""))) {
+		str = remove_doctype(str_remove_ng(str, "<!--", "-->"));
+		while((Rn = xlmlregex.exec(str))) switch((Rn[3]=Rn[3].replace(/_[\s\S]*$/,""))) {
 
 			case 'table': case '工作表': // 9.1.2 <table:table>
 				if(Rn[1]==='/') {
@@ -23219,7 +23336,7 @@ function parse_zip(zip, opts) {
 		if(wbrels && wbrels[i]) {
 			path = 'xl/' + (wbrels[i][1]).replace(/[\/]?xl\//, "");
 			if(!safegetzipfile(zip, path)) path = wbrels[i][1];
-			if(!safegetzipfile(zip, path)) path = wbrelsfile.replace(/_rels\/.*$/,"") + wbrels[i][1];
+			if(!safegetzipfile(zip, path)) path = wbrelsfile.replace(/_rels\/[\S\s]*$/,"") + wbrels[i][1];
 			stype = wbrels[i][2];
 		} else {
 			path = 'xl/worksheets/sheet'+(i+1-nmode)+"." + wbext;
@@ -24217,10 +24334,10 @@ function book_append_sheet(wb, ws, name, roll) {
 	var i = 1;
 	if(!name) for(; i <= 0xFFFF; ++i, name = undefined) if(wb.SheetNames.indexOf(name = "Sheet" + i) == -1) break;
 	if(!name || wb.SheetNames.length >= 0xFFFF) throw new Error("Too many worksheets");
-	if(roll && wb.SheetNames.indexOf(name) >= 0) {
-		var m = name.match(/(^.*?)(\d+)$/);
-		i = m && +m[2] || 0;
-		var root = m && m[1] || name;
+	if(roll && wb.SheetNames.indexOf(name) >= 0 && name.length < 32) {
+		var m = name.match(/\d+$/); // at this point, name length is capped at 32
+		i = m && +m[0] || 0;
+		var root = m && name.slice(0, m.index) || name;
 		for(++i; i <= 0xFFFF; ++i) if(wb.SheetNames.indexOf(name = root + i) == -1) break;
 	}
 	check_ws_name(name);

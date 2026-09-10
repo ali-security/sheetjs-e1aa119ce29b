@@ -5,9 +5,9 @@ function parse_text_p(text/*:string*//*::, tag*/)/*:Array<any>*/ {
 		.replace(/[\t\r\n]/g, " ").trim().replace(/ +/g, " ")
 		.replace(/<text:s\/>/g," ")
 		.replace(/<text:s text:c="(\d+)"\/>/g, function($$,$1) { return Array(parseInt($1,10)+1).join(" "); })
-		.replace(/<text:tab[^>]*\/>/g,"\t")
+		.replace(/<text:tab[^<>]*\/>/g,"\t")
 		.replace(/<text:line-break\/>/g,"\n");
-	var v = unescapexml(fixed.replace(/<[^>]*>/g,""));
+	var v = unescapexml(fixed.replace(/<[^<>]*>/g,""));
 
 	return [v];
 }
@@ -57,8 +57,8 @@ function parse_content_xml(d/*:string*/, _opts)/*:Workbook*/ {
 		var isstub = false, intable = false;
 		var i = 0;
 		xlmlregex.lastIndex = 0;
-		str = str.replace(/<!--([\s\S]*?)-->/mg,"").replace(/<!DOCTYPE[^\[]*\[[^\]]*\]>/gm,"");
-		while((Rn = xlmlregex.exec(str))) switch((Rn[3]=Rn[3].replace(/_.*$/,""))) {
+		str = remove_doctype(str_remove_ng(str, "<!--", "-->"));
+		while((Rn = xlmlregex.exec(str))) switch((Rn[3]=Rn[3].replace(/_[\s\S]*$/,""))) {
 
 			case 'table': case '工作表': // 9.1.2 <table:table>
 				if(Rn[1]==='/') {

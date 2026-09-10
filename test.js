@@ -2587,3 +2587,90 @@ mft.forEach(function(x) {
 		case "yes-formula": formulae = true; break;
 	}});
 }); });
+
+/* CVE-2024-22363 -- Regular Expression Denial of Service
+   Each test below encodes a payload that drives one of the patched regular
+   expressions into catastrophic (quadratic or worse) backtracking.  Every
+   test asserts BOTH a wall-clock budget (so an unhardened build blows past
+   it) AND the correct parse result (so the hardening cannot be faked by
+   simply refusing to parse the input). */
+describe('ReDoS hardening', function() {
+	before(function() { if(!X) X = require(modp); });
+
+	/* the payloads are deliberately large; give the slow legs room */
+	var BUDGET = 4000;
+	function rep(s, n) { return new Array(n + 1).join(s); }
+	function elapsed(f) { var t0 = +(new Date()); f(); return +(new Date()) - t0; }
+
+	it('should not hang on unbalanced tag attributes (attregexg)', function() {
+		/* `([^"\s?>\/]+)\s*=` retries the greedy `+` at every offset of an
+		   attribute-shaped run that never reaches an `=`; requiring a leading
+		   \s collapses that to a single anchored attempt. */
+		var junk = rep("a", 40000);
+		var wb, ms = elapsed(function() {
+			wb = X.read("<table><tr><td " + junk + ">value</td></tr></table>", {type:"string"});
+		});
+		assert.equal(get_cell(wb.Sheets.Sheet1, "A1").v, "value");
+		assert.ok(ms < BUDGET, "parsed a long attribute run in " + ms + "ms");
+	});
+
+	it('should not hang on repeated open tags (html table scan)', function() {
+		/* `<table[\s\S]*?>` rescans to the end of input from every `<table`
+		   occurrence; `<table\b[^<>]*>` cannot cross the next `<`. */
+		var junk = rep("<table", 8000);
+		var ms = elapsed(function() {
+			assert.throws(function() { X.read(junk, {type:"string"}); });
+		});
+		assert.ok(ms < BUDGET, "rejected a run of open tags in " + ms + "ms");
+	});
+
+	it('should not hang on interior whitespace runs (htmldecode)', function() {
+		/* `[\t\n\r ]+$` restarts inside the whitespace run at every offset. */
+		var pad = rep(" ", 40000);
+		var wb, ms = elapsed(function() {
+			wb = X.read("<table><tr><td>a" + pad + "x</td></tr></table>", {type:"string"});
+		});
+		assert.equal(get_cell(wb.Sheets.Sheet1, "A1").v, "a x");
+		assert.ok(ms < BUDGET, "decoded an interior whitespace run in " + ms + "ms");
+	});
+
+	it('should not hang on unbalanced parentheses (fuzzynum)', function() {
+		/* `[(](.*)[)]` scans to the end of input from every `(`. */
+		var parens = rep("(", 40000);
+		var wb, ms = elapsed(function() {
+			wb = X.read("<table><tr><td>" + parens + "</td></tr></table>", {type:"string"});
+		});
+		var cell = get_cell(wb.Sheets.Sheet1, "A1");
+		assert.equal(cell.t, "s");
+		assert.equal(cell.v, parens);
+		assert.ok(ms < BUDGET, "scanned unbalanced parentheses in " + ms + "ms");
+	});
+
+	it('should not hang on colon runs in MIME headers (parse_mime)', function() {
+		/* `^(.*?):\s*([^\s].*)$` retries `([^\s].*)$` at every colon; the `\n`
+		   keeps `.*` from reaching the end of the subject so `$` never
+		   matches.  `^([^:]*?):` admits only the first colon. */
+		var poison = rep(":", 40000) + "\n";
+		var mad = [
+			"MIME-Version: 1.0",
+			'Content-Type: multipart/related; boundary="----=SheetJS"',
+			"",
+			"------=SheetJS",
+			poison,
+			"Content-Location: file:///SheetJS/sheetjs.txt",
+			"Content-Transfer-Encoding: base64",
+			"Content-Type: text/plain",
+			"",
+			"U2hlZXRKUw==",
+			"------=SheetJS--",
+			""
+		].join("\r\n");
+		var cfb, ms = elapsed(function() { cfb = X.CFB.read(mad, {type:"binary"}); });
+		var f = X.CFB.find(cfb, "sheetjs.txt");
+		assert.ok(!!f, "MIME part was not recovered");
+		/* "U2hlZXRKUw==" decodes to the 7 bytes of "SheetJS" */
+		assert.equal(f.content.length, 7);
+		assert.equal(f.ctype, "text/plain");
+		assert.ok(ms < BUDGET, "parsed MIME headers in " + ms + "ms");
+	});
+});
