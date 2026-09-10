@@ -3,6 +3,7 @@ function sheet_insert_comments(sheet, comments/*:Array<RawComment>*/, threaded/*
 	var cell/*:Cell*/;
 	comments.forEach(function(comment) {
 		var r = decode_cell(comment.ref);
+		if(r.r < 0 || r.c < 0) return;
 		if(dense) {
 			if(!sheet[r.r]) sheet[r.r] = [];
 			cell = sheet[r.r][r.c];

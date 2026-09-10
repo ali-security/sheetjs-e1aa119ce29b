@@ -17,6 +17,8 @@ var X;
 var modp = './';
 var fs = require('fs'), assert = require('assert');
 describe('source',function(){it('should load',function(){X=require(modp);});});
+/* a `--grep` that filters out the loader above must still see the library */
+if(typeof before != 'undefined') before(function(){ if(!X) X = require(modp); });
 var DIF_XL = true;
 
 var browser = typeof document !== 'undefined';
@@ -2672,5 +2674,176 @@ describe('ReDoS hardening', function() {
 		assert.equal(f.content.length, 7);
 		assert.equal(f.ctype, "text/plain");
 		assert.ok(ms < BUDGET, "parsed MIME headers in " + ms + "ms");
+	});
+});
+
+/* CVE-2023-30533 -- `sheet_insert_comments` looked the raw comment `ref` up as
+   a worksheet key.  `decode_cell` ignores every character that is not an ASCII
+   digit or capital, so a digit-free name decodes to row -1 / column -1: with
+   `<comment ref="__proto__">` the sparse branch resolved `sheet["__proto__"]`
+   to `Object.prototype`, found it truthy, skipped the "create the cell" branch
+   and ran `cell.c = []; cell.c.push(o)` -- attaching the comment list to every
+   object in the realm.  The same lookup reached `Object`, `toString`, `valueOf`
+   and the other prototype members, and in the dense branch it wrote a `-1` row.
+   Both the legacy comments part and the threaded comments part funnel here. */
+describe('comment prototype pollution', function() {
+	before(function() { if(!X) X = require(modp); });
+
+	/* each of these decodes to {r:-1, c:-1} */
+	var BAD_REFS = ["__proto__", "constructor", "toString", "valueOf", "hasOwnProperty", "isPrototypeOf"];
+	/* the shared objects the vulnerable lookup handed back for those names */
+	function victims() { return [
+		Object.prototype,
+		Object,
+		Object.prototype.toString,
+		Object.prototype.valueOf,
+		Object.prototype.hasOwnProperty,
+		Object.prototype.isPrototypeOf
+	]; }
+	function scrub() {
+		var v = victims();
+		for(var i = 0; i < v.length; ++i) {
+			try { delete v[i].c; } catch(e) { /* nothing to undo */ }
+		}
+	}
+	function assert_clean() {
+		var v = victims();
+		for(var i = 0; i < v.length; ++i) {
+			assert.ok(!Object.prototype.hasOwnProperty.call(v[i], "c"), "comment list written onto shared object " + BAD_REFS[i]);
+		}
+		assert.equal(({}).c, void 0);
+		assert.equal(([]).c, void 0);
+	}
+	/* never leave a polluted prototype behind for the rest of the suite */
+	afterEach(scrub);
+
+	/* minimal STORED-entry ZIP writer -- the reader does not verify CRC32 */
+	function u16(x) { return String.fromCharCode(x & 255, (x >> 8) & 255); }
+	function u32(x) { return u16(x & 65535) + u16((x >>> 16) & 65535); }
+	function make_zip(files) {
+		var out = "", cd = "", off = 0, i = 0, lfh = "", name = "", data = "", n = 0;
+		for(i = 0; i < files.length; ++i) {
+			name = files[i][0]; data = files[i][1]; n = data.length;
+			lfh = "PK\x03\x04" + u16(20) + u16(0) + u16(0) + u16(0) + u16(0) + u32(0) + u32(n) + u32(n) + u16(name.length) + u16(0) + name;
+			cd += "PK\x01\x02" + u16(20) + u16(20) + u16(0) + u16(0) + u16(0) + u16(0) + u32(0) + u32(n) + u32(n) + u16(name.length) + u16(0) + u16(0) + u16(0) + u16(0) + u32(0) + u32(off) + name;
+			out += lfh + data;
+			off += lfh.length + n;
+		}
+		return out + cd + "PK\x05\x06" + u16(0) + u16(0) + u16(files.length) + u16(files.length) + u32(cd.length) + u32(off) + u16(0);
+	}
+
+	var NS_REL = "http://schemas.openxmlformats.org/package/2006/relationships";
+	var NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+	var HDR = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+	var CT = HDR + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+		'<Default Extension="xml" ContentType="application/xml"/>' +
+		'<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+		'<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+		'<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+		'<Override PartName="/xl/comments1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml"/>' +
+		'<Override PartName="/xl/threadedComments/threadedComment1.xml" ContentType="application/vnd.ms-excel.threadedcomments+xml"/>' +
+		'</Types>';
+	var ROOTRELS = HDR + '<Relationships xmlns="' + NS_REL + '">' +
+		'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>';
+	var WB = HDR + '<workbook xmlns="' + NS_MAIN + '" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+		'<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>';
+	var WBRELS = HDR + '<Relationships xmlns="' + NS_REL + '">' +
+		'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>';
+	var WS = HDR + '<worksheet xmlns="' + NS_MAIN + '"><dimension ref="A1"/>' +
+		'<sheetData><row r="1"><c r="A1" t="str"><v>SheetJS</v></c></row></sheetData></worksheet>';
+	var WSRELS = HDR + '<Relationships xmlns="' + NS_REL + '">' +
+		'<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments1.xml"/>' +
+		'<Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2017/10/relationships/threadedComment" Target="../threadedComments/threadedComment1.xml"/>' +
+		'</Relationships>';
+
+	/* the payload puts a valid anchor in the same part as the hostile ones, so
+	   a build that simply dropped the whole comments part cannot pass */
+	function comments_part(refs) {
+		var o = HDR + '<comments xmlns="' + NS_MAIN + '"><authors><author>SheetJS</author></authors><commentList>';
+		for(var i = 0; i < refs.length; ++i) {
+			o += '<comment ref="' + refs[i] + '" authorId="0"><text><t>' + (refs[i] == "A1" ? "legacy" : "pwn") + '</t></text></comment>';
+		}
+		return o + '</commentList></comments>';
+	}
+	function tcomments_part(refs) {
+		var o = HDR + '<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments">';
+		for(var i = 0; i < refs.length; ++i) {
+			o += '<threadedComment ref="' + refs[i] + '" dT="2023-04-12T00:00:00.00" personId="{54EEA955-0001}" id="{54EEA955-000' + (i + 1) + '}">' +
+				'<text>' + (refs[i] == "B1" ? "threaded" : "pwn") + '</text></threadedComment>';
+		}
+		return o + '</ThreadedComments>';
+	}
+	function craft(refs, trefs) {
+		return make_zip([
+			["[Content_Types].xml", CT],
+			["_rels/.rels", ROOTRELS],
+			["xl/workbook.xml", WB],
+			["xl/_rels/workbook.xml.rels", WBRELS],
+			["xl/worksheets/sheet1.xml", WS],
+			["xl/worksheets/_rels/sheet1.xml.rels", WSRELS],
+			["xl/comments1.xml", comments_part(refs)],
+			["xl/threadedComments/threadedComment1.xml", tcomments_part(trefs)]
+		]);
+	}
+	/* legacy refs: every hostile name plus a real anchor; threaded: same idea */
+	var LEGACY_REFS = BAD_REFS.concat(["A1"]);
+	var THREAD_REFS = BAD_REFS.concat(["B1"]);
+
+	it('should not pollute Object.prototype through a comment ref', function() {
+		scrub();
+		var wb = X.read(craft(LEGACY_REFS, THREAD_REFS), {type:"binary"});
+		assert_clean();
+		var ws = wb.Sheets.Sheet1;
+		/* the honest comments still land, and land on the cells themselves */
+		assert.ok(Object.prototype.hasOwnProperty.call(ws.A1, "c"), "legacy comment was not attached to A1");
+		assert.equal(ws.A1.c.length, 1);
+		assert.equal(ws.A1.c[0].t, "legacy");
+		assert.equal(ws.A1.c[0].a, "SheetJS");
+		assert.ok(!ws.A1.c[0].T);
+		assert.ok(Object.prototype.hasOwnProperty.call(ws.B1, "c"), "threaded comment was not attached to B1");
+		assert.equal(ws.B1.c.length, 1);
+		assert.equal(ws.B1.c[0].t, "threaded");
+		assert.ok(!!ws.B1.c[0].T);
+		/* the hostile names must not have been turned into cells either */
+		for(var i = 0; i < BAD_REFS.length; ++i) {
+			assert.ok(!Object.prototype.hasOwnProperty.call(ws, BAD_REFS[i]), "created a cell named " + BAD_REFS[i]);
+		}
+		assert.equal(ws["!ref"], "A1:B1");
+	});
+
+	it('should not pollute Object.prototype through a threaded comment ref', function() {
+		scrub();
+		/* threaded comments override legacy ones, so exercise that part alone */
+		var wb = X.read(craft(["A1"], THREAD_REFS), {type:"binary"});
+		assert_clean();
+		var ws = wb.Sheets.Sheet1;
+		assert.ok(Object.prototype.hasOwnProperty.call(ws.B1, "c"), "threaded comment was not attached to B1");
+		assert.equal(ws.B1.c.length, 1);
+		assert.equal(ws.B1.c[0].t, "threaded");
+		assert.ok(!!ws.B1.c[0].T);
+	});
+
+	it('should not create negative rows in a dense sheet', function() {
+		scrub();
+		var wb = X.read(craft(LEGACY_REFS, THREAD_REFS), {type:"binary", dense:true});
+		assert_clean();
+		var ws = wb.Sheets.Sheet1;
+		assert.ok(Array.isArray(ws), "expected a dense sheet");
+		assert.ok(!Object.prototype.hasOwnProperty.call(ws, "-1"), "comment created row -1");
+		assert.equal(ws["!ref"], "A1:B1");
+		assert.equal(get_cell(ws, "A1").c[0].t, "legacy");
+		assert.equal(get_cell(ws, "B1").c[0].t, "threaded");
+	});
+
+	it('should still reject a comment ref with only a bad column', function() {
+		scrub();
+		/* "1" decodes to {r:0, c:-1}: a row with no column is not an address */
+		var wb = X.read(craft(["1", "A1"], ["B1"]), {type:"binary"});
+		assert_clean();
+		var ws = wb.Sheets.Sheet1;
+		assert.ok(!Object.prototype.hasOwnProperty.call(ws, "1"), 'created a cell named "1"');
+		assert.equal(ws.A1.c.length, 1);
+		assert.equal(ws.A1.c[0].t, "legacy");
+		assert.equal(ws["!ref"], "A1:B1");
 	});
 });
